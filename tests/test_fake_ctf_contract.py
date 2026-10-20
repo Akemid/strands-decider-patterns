@@ -64,7 +64,7 @@ class TestJoinResult:
         async with Client(FakeGame(turns=1)) as c:
             _, joined = await c.join()
         board = joined["map"]
-        assert board["grid"] == joined["grid"]
+        assert joined["grid"] == board["grid"]["width"]  # the board is square: join reports the width only
         assert len(board["ascii"]) == board["grid"]["height"]
         assert {len(row) for row in board["ascii"]} == {board["grid"]["width"]}
         fields = board["fields"]
@@ -287,7 +287,7 @@ class TestMatchOverAndAcks:
         assert over["reason"] == "stopped" and over["winner"] is None
 
     async def test_a_skipped_tick_is_unknown_unless_the_server_recorded_a_deadline_rejection(self):
-        # last-action.ts: without an accepted submission for the previous tick, `rejected/deadline` needs the
+        # Real server last-action rule: without an accepted submission for the previous tick, `rejected/deadline` needs the
         # agent's own `action_rejected` event; otherwise the outcome is `unknown`.
         async with Client(FakeGame(turns=3)) as c:
             await c.join()
@@ -332,3 +332,40 @@ class TestMatchOverAndAcks:
             _, turn = await c.tool("wait_for_turn")
             _, ack = await c.tool("wait", tick=turn["tick"])
         assert ack == {"status": "rejected", "tick": turn["tick"], "reason": "match_not_started"}
+
+
+class TestJoinAndActionSchemas:
+    async def test_join_reports_grid_as_the_board_width_and_the_default_min_tick(self):
+        async with Client(FakeGame(turns=1)) as c:
+            _, joined = await c.join()
+        assert joined["grid"] == 15 and joined["min_tick_ms"] == 1000
+
+    async def test_action_tools_accept_a_bounded_rationale_and_a_direction_enum(self):
+        async with Client(FakeGame(turns=1)) as c:
+            tools = {t.name: t.inputSchema["properties"] for t in (await c.session.list_tools()).tools}
+        for name in ("move", "tag", "grab_flag", "wait"):
+            rationale = tools[name]["rationale"]
+            assert rationale["anyOf"][0]["type"] == "string" and rationale["anyOf"][0]["maxLength"] == 280
+        assert tools["move"]["direction"]["enum"] == ["up", "down", "left", "right"]
+
+    async def test_a_rationale_is_accepted_on_every_action(self):
+        async with Client(FakeGame(turns=2)) as c:
+            await c.join()
+            _, turn = await c.tool("wait_for_turn")
+            is_error, ack = await c.tool("wait", tick=turn["tick"], rationale="holding")
+        assert not is_error and ack["status"] == "accepted"
+
+    async def test_an_invalid_direction_is_a_rejected_ack_not_a_crash(self):
+        from simulator.engine import SimMatch
+
+        async with Client(FakeGame(turns=2, engine=SimMatch())) as c:
+            await c.join()
+            _, turn = await c.tool("wait_for_turn")
+            is_error, ack = await c.tool("move", tick=turn["tick"], direction="north")
+        assert not is_error and ack == {"status": "rejected", "tick": turn["tick"], "reason": "invalid_message"}
+
+    def test_make_route_carries_real_risk_cells_and_blocked_reason(self):
+        route = make_route("r", "tag", None, 0, risks=((2, "blue-1", (9, 6)),), blocked_reason="occupied")
+        assert route["risks"] == [{"cell": {"x": 9, "y": 6}, "step": 2, "enemy_id": "blue-1"}]
+        assert route["blocked_now"] is True and route["blocked_reason"] == "occupied"
+        assert make_route("r", "tag", None, 0)["blocked_now"] is False

@@ -12,3 +12,4 @@ runs/
 dist/
 *.egg-info/
 build/
+.atl/

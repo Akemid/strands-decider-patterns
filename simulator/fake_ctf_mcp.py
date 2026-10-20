@@ -27,15 +27,21 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.shared.memory import create_client_server_memory_streams
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 
 MAX_SLOTS = 3  # `agent_index` is 0..2
+DIRECTIONS = ["up", "down", "left", "right"]
+# Optional on every action tool; the schema bounds it, the simulator does not use it.
+Rationale = Annotated[str | None, Field(max_length=280, description="Optional short explanation for spectators.")]
+# The schema advertises the enum, validation stays in the handler so a bad value is a rejected ack.
+Direction = Annotated[str, Field(json_schema_extra={"enum": DIRECTIONS})]
 WALLS = [{"x": 1, "y": 1}, {"x": 2, "y": 1}]
 GRID = {"width": 15, "height": 15}
 FIELDS = {"red": {"min_x": 0, "max_x": 6}, "blue": {"min_x": 8, "max_x": 14}, "neutral_x": 7}
@@ -90,21 +96,25 @@ def make_route(
     first_step: str | None,
     length: int,
     *,
-    risks: tuple[tuple[int, str], ...] = (),
-    blocked: bool = False,
+    risks: tuple[tuple[int, str, tuple[int, int]], ...] = (),
+    blocked_reason: str | None = None,
     threat: tuple[str, int, int] | None = None,
     path: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """A route in the v2 shape. `threat` is `(enemy_id, step, distance)` for `closest_threat`."""
+    """A route in the v2 shape. `risks` are `(step, enemy_id, (x, y))`; `threat` is `(enemy_id, step, distance)`.
+
+    `blocked_reason` is `"contention"`, `"occupied"` or None; any reason makes `blocked_now` true.
+    """
     return {
         "id": rid,
         "goal": goal,
         "first_step": first_step,
         "length": length,
         "path": path if path is not None else [],
-        "blocked_now": blocked,
-        "blocked_reason": "contention" if blocked else None,
-        "risks": [{"cell": {"x": 0, "y": 0}, "step": step, "enemy_id": enemy} for step, enemy in risks],
+        "blocked_now": blocked_reason is not None,
+        "blocked_reason": blocked_reason,
+        "risks": [{"cell": {"x": cell[0], "y": cell[1]}, "step": step, "enemy_id": enemy}
+                  for step, enemy, cell in risks],
         "closest_threat": (
             None if threat is None else {"enemy_id": threat[0], "step": threat[1], "distance": threat[2]}
         ),
@@ -201,7 +211,7 @@ class FakeGame:
         return json.dumps({"status": "accepted", "tick": tick})
 
     def _last_action(self, tick: int) -> dict | None:
-        """Mirror of the server's `deriveLastAction` (last-action.ts) for the turn at `tick`.
+        """Mirror of the real server's last-action derivation for the turn at `tick`.
 
         null on the first turn; the label and outcome of this session's own accepted action for the previous
         tick; with none, `rejected/deadline` only when the agent's own `action_rejected(deadline)` event is
@@ -306,8 +316,8 @@ class FakeGame:
                 "agent_index": index,
                 "ticks": game.turns,
                 "deadline_ms": game.deadline_ms,
-                "grid": GRID,
-                "min_tick_ms": 0,
+                "grid": GRID["width"],  # the board is square: join reports only the width
+                "min_tick_ms": 1000,  # a typical pacing value; the simulator does not pace ticks
             }
             if game.include_map_in_join:
                 result["map"] = MAP
@@ -350,29 +360,30 @@ class FakeGame:
             return json.dumps(turn)
 
         @self.server.tool()
-        def wait(tick: int) -> str:
+        def wait(tick: int, rationale: Rationale = None) -> str:
             """Do nothing this tick."""
             game._apply("wait", {"tick": tick})  # noqa: SLF001
             return game._ack(tick, "wait")  # noqa: SLF001
 
         @self.server.tool()
-        def tag(tick: int, enemy_id: str) -> str:
+        def tag(tick: int, enemy_id: str, rationale: Rationale = None) -> str:
             """Tag an adjacent enemy."""
             game._apply("tag", {"tick": tick, "enemy_id": enemy_id})  # noqa: SLF001
             return game._ack(tick, f"tag:{enemy_id}")  # noqa: SLF001
 
         @self.server.tool()
-        def grab_flag(tick: int) -> str:
+        def grab_flag(tick: int, rationale: Rationale = None) -> str:
             """Pick up the enemy flag."""
             game._apply("grab_flag", {"tick": tick})  # noqa: SLF001
             return game._ack(tick, "grab_flag")  # noqa: SLF001
 
         @self.server.tool()
-        def move(tick: int, direction: str) -> str:
+        def move(tick: int, direction: Direction, rationale: Rationale = None) -> str:
             """Move one step."""
+            if direction not in DIRECTIONS:  # the schema lists the enum, but a client may still send anything
+                return json.dumps({"status": "rejected", "tick": tick, "reason": "invalid_message"})
             game._apply("move", {"tick": tick, "direction": direction})  # noqa: SLF001
             return game._ack(tick, f"move:{direction}")  # noqa: SLF001
-
 
 @asynccontextmanager
 async def in_memory_transport(server: FastMCP):

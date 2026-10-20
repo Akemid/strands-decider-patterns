@@ -95,7 +95,7 @@ intervention against a real Strands `Agent` with a scripted model, and the agent
 ```
 decider_patterns/   reusable pattern (client, tool_selection, intervention, timing)
 examples/ctf_agent/ the CTF example agent and its metrics
-simulator/          MCP test double, tiny game engine, HTTP server, scripted stand-in Decider
+simulator/          MCP test double (fidelity notes: simulator/README.md), tiny game engine, HTTP server, scripted stand-in Decider
 scripts/            compare_runs.py
 tests/
 ```
