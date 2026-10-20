@@ -169,9 +169,17 @@ def open_directions(state: dict[str, Any]) -> list[str]:
 
 
 def offered_routes(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Well-formed server routes (dicts with a string id), in server order."""
+    """Well-formed, actionable server routes (dicts with a string id), in server order.
+
+    While carrying, the server points the `enemy_flag_*` family at the flag we hold, so it sends a
+    length-0 route that has nothing to do: it is dropped here (options, prompt and plan all use this).
+    """
     routes = state.get("routes")
-    return [r for r in routes if isinstance(r, dict) and isinstance(r.get("id"), str)] if isinstance(routes, list) else []
+    if not isinstance(routes, list):
+        return []
+    carrying = is_carrying(state)
+    return [r for r in routes if isinstance(r, dict) and isinstance(r.get("id"), str)
+            and not (carrying and r.get("goal") == "enemy_flag" and r.get("length") == 0)]
 
 
 Cell = tuple[int, int]

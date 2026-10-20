@@ -8,6 +8,7 @@ import unittest
 
 from examples.ctf_agent import agent as dl
 from examples.ctf_agent.options import describe_route
+from examples.ctf_agent.render import render_state
 
 
 def route(rid, goal, step="left", length=5, path=None, blocked=False, risks=(), threat=None):
@@ -171,6 +172,37 @@ class BlockedAnnotationTests(unittest.TestCase):
         text = dl.build_options(turn, plan)["enemy_flag_direct"]
         self.assertNotIn("continues your current path", text)
         self.assertIn("| would continue your path but is BLOCKED now", text)
+
+
+class CarrierRouteTests(unittest.TestCase):
+    """A carrier is offered a length-0 `enemy_flag_*` route (the flag sits on it): acting on it would be a no-op."""
+
+    def turn(self, carrying, flag_carried_by=None):
+        turn = turn_with([route("enemy_flag_direct", "enemy_flag", step=None, length=0),
+                          route("own_base_direct", "own_base", step="left", length=6)], me=(9, 7))
+        state = turn["state"]
+        if carrying:
+            state["agents"][0]["carrying"] = "red"
+        state["flags"] = [{"team": "red", "position": {"x": 1, "y": 7}, "carried_by": None},
+                          {"team": "red", "position": {"x": 9, "y": 7},
+                           "carried_by": flag_carried_by}]
+        return turn
+
+    def test_a_carrier_is_not_offered_the_length_zero_enemy_flag_route(self):
+        options = dl.build_options(self.turn(True, flag_carried_by="blue-1"))
+        self.assertNotIn("enemy_flag_direct", options)
+        self.assertNotIn("grab_flag", options)
+        self.assertIn("own_base_direct", options)
+
+    def test_the_prompt_does_not_list_the_length_zero_route_for_a_carrier(self):
+        text = render_state(self.turn(True, flag_carried_by="blue-1"))
+        self.assertNotIn("enemy_flag_direct", text)
+
+    def test_a_non_carrier_standing_on_the_enemy_flag_still_maps_to_grab_flag(self):
+        turn = self.turn(False)
+        options = dl.build_options(turn)
+        self.assertIn("enemy_flag_direct", options)
+        self.assertEqual(dl.label_to_call("enemy_flag_direct", 5, turn)[0], "grab_flag")
 
 
 class DeciderLoopCliTests(unittest.TestCase):
