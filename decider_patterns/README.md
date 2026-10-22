@@ -20,7 +20,38 @@ options = {
 Write each description as a neutral fact, not a recommendation: the Decider reads them like a list of choices.
 Include a safe default (`wait`) so there is always something valid to run.
 
-## 2. Wire it into the agent loop (`ToolSelectionGate`)
+## 2. Narrow, then choose
+
+Code decides FACTS, the Decider decides JUDGMENT. Anything your code can compute from the state (a tool is
+blocked, a target is out of range, an action is unsafe) should not be a question for the Decider: drop those
+options first, then ask ONE `choice` over what is left. The request gets shorter (latency grows with input
+tokens: about 1 ms per token on an M3 Pro, measured) and the Decider only spends its judgment where it is needed.
+
+```python
+from decider_patterns import ToolSelectionGate, narrow_options
+
+def option_filter(options, state):
+    # facts you can compute; keep(label) -> True means "still offer it"
+    return narrow_options(options, lambda label: label not in blocked_tools(state))
+
+gate = ToolSelectionGate("Pick the next action.", option_filter=option_filter)
+decision = gate.select(ask, state_text, options, remaining_ms=time_left_ms)
+decision.filter_reason, decision.options_offered   # log them next to the confidence
+```
+
+Rules of `narrow_options(options, keep, always_keep=("wait",))`:
+
+- `always_keep` labels (the safe default) survive every filter.
+- If nothing but the always-kept options would remain, the FULL set is offered instead (the lesser evil: picking the
+  least bad real option beats choosing between one bad option and doing nothing). Reason: `lesser_evil`.
+- `filter_reason` is `filtered` (something was dropped), `lesser_evil`, or `unfiltered` (nothing was dropped).
+- The route and the validity of the pick are checked against the narrowed set, so a pick outside it never runs.
+
+Facts that depend on more than the option label (a rule that switches on a threat) belong in your own filter
+function; see `filter_options` in `examples/ctf_agent/options.py`. Also keep the request text short: one-sentence
+instructions and compact option descriptions (goal, size, first step, flags such as BLOCKED or risk).
+
+## 3. Wire it into the agent loop (`ToolSelectionGate`)
 
 ```python
 from strands import Agent, tool
@@ -87,14 +118,14 @@ Notes:
 - `Decider()` defaults to a 120 s timeout (the first request at a new input length can compile for seconds), far
   above a 5 s decision window. Pass `timeout_s=` to the gate (or `timeout_s=` to `DeciderGateHandler`): each request
   then uses `min(timeout_s, time left)`. Use a separate `decider.ask(...)` warm-up for the slow first request.
-- Extra yes/no questions share the same encoded state, so they are nearly free:
-  `gate.select(..., extra={"risky": Decider.noul("Is this risky?", {...})})`, then combine them in your own policy and
-  pass `label=`/`confidence=` to `gate.decide(...)`. The CTF example does this (`examples/ctf_agent/options.py`).
+- Extra yes/no questions can ride in the same request (`gate.select(..., extra={"risky": Decider.noul(...)})`) and
+  be combined in your own policy (`gate.decide(..., label=, confidence=)`), but every question adds input tokens
+  and so latency. Prefer filtering facts in code (section 2); the CTF example moved from three questions to one.
 - If your fallback LLM has a time budget, run it with `run_with_timeout` and guard it with `TickCancelHandler`, so a
   late action from an abandoned run is blocked and you never send a second action. Add `StopAfterToolsHook` to end
   the turn right after the action tool, saving a model call.
 
-## 3. Or gate individual tool calls (`DeciderGateHandler`)
+## 4. Or gate individual tool calls (`DeciderGateHandler`)
 
 When the LLM stays in charge and you only want a cheap safety review before risky tools, use the Strands
 intervention. It asks yes/no questions about the proposed call and, if a rule fires, cancels it and sends feedback so

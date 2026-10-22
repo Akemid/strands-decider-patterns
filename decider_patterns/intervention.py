@@ -201,11 +201,14 @@ class StopAfterToolsHook:
     `AfterToolsEvent.end_turn` makes the event loop halt after the tool batch without calling the model again
     (verified on strands-agents 1.59). Interventions cannot do this, and `AfterToolsEvent` carries tool results
     without names, so `AfterToolCallEvent` records that an action tool ran. A cancelled call (denied by
-    `TickCancelHandler`) does not count as an action.
+    `TickCancelHandler`) does not count as an action. With `cancel` (the tick's event), a batch finishing after
+    the cancel also ends the turn: otherwise the denied call is answered by another model call, and an abandoned
+    thread keeps billing until the model replies with text.
     """
 
-    def __init__(self, action_tools: Collection[str]) -> None:
+    def __init__(self, action_tools: Collection[str], cancel: threading.Event | None = None) -> None:
         self.action_tools = frozenset(action_tools)
+        self.cancel = cancel
         self.acted = False
 
     def register_hooks(self, registry: Any, **kwargs: Any) -> None:
@@ -219,3 +222,5 @@ class StopAfterToolsHook:
     def after_tools(self, event: Any) -> None:
         if self.acted:
             event.end_turn = "action sent"
+        elif self.cancel is not None and self.cancel.is_set():
+            event.end_turn = "tick cancelled"  # an abandoned run must not call (and bill) the model again

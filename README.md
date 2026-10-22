@@ -30,8 +30,9 @@ See [decider_patterns/README.md](decider_patterns/README.md) for the recipe and 
 
 ## The example: a CTF agent
 
-`examples/ctf_agent/` is a code-owned game loop: `wait_for_turn` -> render state -> one Decider request with three
-questions (`action` choice over the server's routes, plus `threat` and `route_bad` yes/no) -> call the tool.
+`examples/ctf_agent/` is a code-owned game loop: `wait_for_turn` -> render state -> filter the options in code
+(drop blocked or risky routes, or keep only tag/defend options when the flag is threatened) -> one Decider request
+with a single `action` choice over what is left -> call the tool.
 Below the confidence threshold it runs a Strands `Agent` on Bedrock for that tick. `--llm-only` is the ablation
 where the LLM decides every tick. See [examples/ctf_agent/README.md](examples/ctf_agent/README.md).
 
@@ -81,6 +82,72 @@ A single short local run (25 ticks in decider mode on the 2B model on Apple sili
 Claude Haiku 4.5) gave about 970 ms average per decision against about 2600 ms, with no LLM call in any decider-mode
 tick. Treat it as an illustration, not a benchmark: one match, one machine, tiny samples.
 
+## Benchmark
+
+`scripts/benchmark.py` repeats the Decider vs `--llm-only` comparison over several seeds, simulator only (it refuses
+any non-loopback MCP host and port 8080). For each seed it plays both modes in turn on a fresh simulator, then writes
+`summary.json` and `summary.md`.
+
+Prerequisites: a Decider server on `STRANDS_DECIDER_URL` (default `http://127.0.0.1:8099`) for decider mode, and AWS
+credentials with Bedrock access (both modes can call the LLM). Preflight checks both; skip one with
+`--skip-decider-check` / `--skip-aws-check`.
+
+```bash
+# see exactly what would run, executes nothing
+uv run python scripts/benchmark.py --runs 2 --dry-run
+
+# the real run (calls Bedrock, costs money)
+uv run python scripts/benchmark.py --seeds 1..5 --ticks 40 --model haiku
+```
+
+Output lands in `runs/bench-<timestamp>/`: one `<mode>-seed<N>.jsonl` and `.log` per run, plus `summary.md` and
+`summary.json` (latency avg/p50/p95 over ticks that were timed, Decider-only vs end-to-end, path mix, LLM calls avoided, tokens, estimated cost,
+environment). The cost uses a price table in the script that is an assumption: verify it before quoting dollars.
+
+### Cost guards
+
+LLM spend is bounded at several layers. All defaults are conservative and overridable:
+
+- Agent (`--max-llm-calls`, default 60, `0` = never call the LLM): counts real model invocations, so a runaway
+  turn cannot exceed it. Past the cap a tick runs the Decider choice (if valid) or waits (`llm_capped` in the metrics).
+  Only one LLM thread is allowed at a time (`llm_busy`), and a tick that timed out ends its Agent turn instead of
+  letting an abandoned thread call the model again.
+- Model: `max_tokens=1024` (`--max-tokens`; 256 truncated tool-call turns), one attempt (no botocore or Strands retries), 10 s read and 5 s connect timeouts.
+- Benchmark: `--max-llm-calls-per-run 60`, `--max-total-llm-calls 300`, `--max-cost-usd 5.0` (an estimate from the
+  metrics files at assumed prices), `--max-consecutive-failures 2` and `--ticks` at most 200. A hit limit aborts
+  the remaining runs and `summary.md` records `aborted: <reason>`. A timed-out run kills the whole agent process group.
+
+If the model still hits `max_tokens`, the tick is recorded as `llm_error` (reason `max_tokens`) and runs the Decider
+choice (if valid) or waits; other unexpected LLM errors crash the agent on purpose, so nothing can loop and multiply calls.
+
+Transient Bedrock errors (throttling, `serviceUnavailableException`, model not ready, internal server error) are handled
+the same way: the tick is recorded as `llm_error` (reason `transient:<code>`) and falls back to the Decider choice or a
+wait, with no app-level retry (still one model call per tick). `--max-consecutive-llm-errors` (default 3, agent and
+benchmark) makes the agent exit non-zero after that many in a row, with no further model calls; a successful LLM call
+resets the streak. `summary.md` lists the `llm_error` ticks and reasons per run, and a run stopped by that breaker is
+`failed` with outcome `llm errors: <reason>`. Any other error still crashes immediately.
+
+If you see these errors often, check your Bedrock quotas (Service Quotas -> Amazon Bedrock: on-demand requests per
+minute and tokens per minute for the model you use) and request an increase if needed. This is an account-side action.
+
+Tuning flags (agent, also passed through by the benchmark and shown in `--dry-run` and `summary.md`):
+`--llm-budget-ms` (default 3000: the LLM only runs if that plus the 300 ms margin is left, so a ~1.3 s Decider call in a
+5 s tick still leaves room for Bedrock), `--threshold` (Decider confidence needed to skip the LLM, default 0.85) and
+`--max-tokens` (agent only). Pick a threshold offline and for free with the sweep, which only reads a metrics file:
+
+```
+uv run python scripts/threshold_sweep.py runs/bench-<ts>/decider-seed1.jsonl [--out sweep.md] [--min 0.3 --max 0.95 --step 0.05]
+```
+
+It prints, per threshold, the share of ticks that would be `decider` vs need the LLM, plus the confidence
+distribution. It shows coverage only, not decision quality.
+
+These are estimates, not billing. As the real backstop, create an AWS Budgets alert (and action) on the account
+before running the benchmark; that is a step for you, the script cannot do it.
+
+Caveat: the simulator is lock-step, so latency has no game cost, and win rate is not representative. See
+[simulator/README.md](simulator/README.md#simulator-fidelity).
+
 ## Tests
 
 ```bash
@@ -96,7 +163,7 @@ intervention against a real Strands `Agent` with a scripted model, and the agent
 decider_patterns/   reusable pattern (client, tool_selection, intervention, timing)
 examples/ctf_agent/ the CTF example agent and its metrics
 simulator/          MCP test double (fidelity notes: simulator/README.md), tiny game engine, HTTP server, scripted stand-in Decider
-scripts/            compare_runs.py
+scripts/            compare_runs.py, benchmark.py
 tests/
 ```
 

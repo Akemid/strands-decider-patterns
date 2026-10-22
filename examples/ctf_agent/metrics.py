@@ -1,6 +1,6 @@
 """Per-tick structured metrics (JSONL) and the decider-vs-LLM comparison summary.
 
-One line per tick: which path decided (decider / llm / budget / wait), how long the Decider and the LLM took,
+One line per tick: which path decided (decider / llm / budget / wait / llm_error), how long the Decider and the LLM took,
 and token counts when available. `scripts/compare_runs.py` turns two such files into a short report.
 """
 
@@ -18,16 +18,25 @@ from typing import Any, Self
 class TickRecord:
     tick: int
     mode: str  # "decider" or "llm-only"
-    path: str  # decider | llm | budget | wait
+    path: str  # decider | llm | budget | wait | llm_capped | llm_busy | llm_error
     decider_ms: float | None = None  # wall time of the Decider request
     llm_ms: float | None = None  # wall time of the LLM fallback run
     label: str | None = None
     confidence: float | None = None
     reason: str | None = None
+    filter_reason: str | None = None  # filtered | lesser_evil | unfiltered (Decider mode, and shadow)
+    options_offered: int | None = None  # options sent to the Decider after filtering
     llm_timeout: bool = False
     decider_input_tokens: int | None = None
     llm_input_tokens: int | None = None
     llm_output_tokens: int | None = None
+    # Shadow mode (--llm-only --shadow-decider): the local Decider's pick for the same state, never executed.
+    shadow_label: str | None = None
+    shadow_confidence: float | None = None
+    shadow_ms: float | None = None
+    shadow_error: str | None = None
+    executed_label: str | None = None  # the option label matching what the LLM executed (None: no match)
+    executed_kind: str | None = None  # route | action | wait | unmatched | none
 
     @property
     def decision_ms(self) -> float:
@@ -141,3 +150,32 @@ def format_comparison(decider_run: RunSummary, llm_run: RunSummary) -> str:
     if result.speedup_avg is not None:
         lines.append(f"Average decision latency speedup: {result.speedup_avg:.1f}x")
     return "\n".join(lines)
+
+
+class TurnRecorder:
+    """Appends raw payloads to a JSONL file as `{"kind": ..., "payload": ...}` (join/map once, then each turn).
+
+    With `path=None` it does nothing. Only server payloads are written, never headers or tokens.
+    """
+
+    def __init__(self, path: str | Path | None) -> None:
+        self._path = Path(path) if path else None
+        self._file = None
+
+    def __enter__(self) -> Self:
+        if self._path is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = self._path.open("a", encoding="utf-8")
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def write(self, kind: str, payload: Mapping[str, Any]) -> None:
+        if self._file is None:
+            return
+        clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+        self._file.write(json.dumps({"kind": kind, "payload": clean}, ensure_ascii=False) + "\n")
+        self._file.flush()

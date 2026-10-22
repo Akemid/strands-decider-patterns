@@ -7,6 +7,7 @@ import sys
 import unittest
 
 from examples.ctf_agent import agent as dl
+from examples.ctf_agent import options as ctf_options
 from examples.ctf_agent.options import describe_route
 from examples.ctf_agent.render import render_state
 
@@ -32,127 +33,201 @@ def options_for(turn, plan=None):
     return dl.build_options(turn, plan)
 
 
-def answers(threat=0.0, route_bad=0.0, pick="enemy_flag_direct", conf=0.9, probs=None):
-    return {"threat": {"type": "noul", "noul": threat},
-            "route_bad": {"type": "noul", "noul": route_bad},
-            "action": {"type": "choice", "choice": pick, "confidence": conf,
+def answers(pick="enemy_flag_direct", conf=0.9, probs=None):
+    return {"action": {"type": "choice", "choice": pick, "confidence": conf,
                        "probabilities": probs if probs is not None else {pick: conf}}}
 
 
-class CombineAnswersTests(unittest.TestCase):
+class SingleQuestionTests(unittest.TestCase):
     def setUp(self):
         self.routes = [
             route("enemy_flag_direct", "enemy_flag", length=6, risks=[(3, "red-1")]),
             route("enemy_flag_safe", "enemy_flag", step="up", length=9),
-            route("enemy_flag_blocked", "enemy_flag", length=4, blocked=True),
             route("tag:red-1", "tag", step="left", length=3),
-            route("tag:red-2", "tag", step=None, length=0),
-            route("defend_flag", "defend_flag", step="right", length=2),
-            route("own_base_direct", "own_base", length=8),
         ]
         self.turn = turn_with(self.routes)
         self.options = options_for(self.turn)
 
-    def combine(self, ans, **kw):
-        return dl.combine_answers(ans, self.options, self.turn, dl.Plan(), **kw)
-
-    def test_questions_cover_threat_route_bad_and_action_in_one_request(self):
+    def test_the_request_holds_only_the_action_choice(self):
         questions = dl.build_questions(self.options)
-        self.assertEqual(set(questions), {"threat", "route_bad", "action"})
-        self.assertEqual(questions["threat"]["type"], "noul")
-        self.assertEqual(questions["route_bad"]["type"], "noul")
+        self.assertEqual(set(questions), {"action"})
         self.assertEqual(questions["action"]["type"], "choice")
         self.assertEqual(set(questions["action"]["criteria"]), set(self.options))
-        self.assertEqual(set(questions["threat"]["criteria"]), {"true", "false"})
-        self.assertEqual(set(questions["route_bad"]["criteria"]), {"true", "false"})
 
     def test_no_recommendation_wording_in_options(self):
         for text in self.options.values():
             self.assertNotIn("recommend", text.lower())
 
-    def test_fallback_to_choice(self):
-        label, conf, reason = self.combine(answers(threat=0.1, route_bad=0.2, pick="enemy_flag_safe", conf=0.77))
-        self.assertEqual((label, reason), ("enemy_flag_safe", "choice"))
+    def test_the_decision_is_the_choice_with_its_confidence_and_the_filter_reason(self):
+        label, conf, reason = dl.combine_answers(answers(pick="enemy_flag_safe", conf=0.77), "filtered")
+        self.assertEqual((label, reason), ("enemy_flag_safe", "filtered"))
         self.assertAlmostEqual(conf, 0.77)
 
-    def test_threat_prefers_adjacent_tag_without_probabilities(self):
-        ans = answers(threat=0.8, pick="enemy_flag_direct")
-        ans["action"]["probabilities"] = {}
-        label, conf, reason = self.combine(ans)
-        self.assertEqual((label, reason), ("tag:red-2", "threat"))
-        self.assertAlmostEqual(conf, 0.8)
-
-    def test_threat_uses_choice_probabilities_when_available(self):
-        ans = answers(threat=0.6, pick="enemy_flag_direct",
-                      probs={"enemy_flag_direct": 0.5, "tag:red-1": 0.2, "defend_flag": 0.25, "tag:red-2": 0.05})
-        label, conf, reason = self.combine(ans)
-        self.assertEqual((label, reason), ("defend_flag", "threat"))
-        self.assertAlmostEqual(conf, 0.6)
-
-    def test_threat_without_adjacent_picks_shortest_tag_then_defend(self):
-        routes = [r for r in self.routes if r["id"] != "tag:red-2"]
-        turn = turn_with(routes)
-        opts = options_for(turn)
-        ans = answers(threat=0.9)
-        ans["action"]["probabilities"] = {}
-        self.assertEqual(dl.combine_answers(ans, opts, turn, dl.Plan())[0], "tag:red-1")
-        routes = [r for r in routes if r["id"] != "tag:red-1"]
-        turn = turn_with(routes)
-        self.assertEqual(dl.combine_answers(ans, options_for(turn), turn, dl.Plan())[0], "defend_flag")
-
-    def test_threat_without_tag_or_defend_option_falls_through(self):
-        routes = [r for r in self.routes if r["goal"] not in ("tag", "defend_flag")]
-        turn = turn_with(routes)
-        label, _, reason = dl.combine_answers(answers(threat=0.9, pick="enemy_flag_safe"), options_for(turn), turn, dl.Plan())
-        self.assertEqual((label, reason), ("enemy_flag_safe", "choice"))
-
-    def test_threat_threshold_is_configurable(self):
-        ans = answers(threat=0.6, pick="enemy_flag_safe")
-        self.assertEqual(self.combine(ans, threat_threshold=0.7)[2], "choice")
-        self.assertEqual(self.combine(ans, threat_threshold=0.5)[2], "threat")
-
-    def test_blocked_tag_is_not_a_threat_target(self):
-        routes = [dict(r, blocked_now=True) if r["goal"] in ("tag", "defend_flag") else r for r in self.routes]
-        turn = turn_with(routes)
-        label, _, reason = dl.combine_answers(answers(threat=0.9, pick="enemy_flag_safe"), options_for(turn), turn, dl.Plan())
-        self.assertEqual((label, reason), ("enemy_flag_safe", "choice"))
-
-    def test_blocked_pick_switches_to_safe_same_goal_route(self):
-        label, conf, reason = self.combine(answers(route_bad=0.81, pick="enemy_flag_blocked", conf=0.31))
-        self.assertEqual((label, reason), ("enemy_flag_safe", "avoid blocked/risky"))
-        self.assertAlmostEqual(conf, 0.81)
-
-    def test_risky_pick_switches_to_safe_same_goal_route(self):
-        label, _, reason = self.combine(answers(route_bad=0.6, pick="enemy_flag_direct"))
-        self.assertEqual((label, reason), ("enemy_flag_safe", "avoid blocked/risky"))
-
-    def test_no_switch_when_route_bad_low(self):
-        self.assertEqual(self.combine(answers(route_bad=0.49, pick="enemy_flag_blocked"))[2], "choice")
-
-    def test_no_switch_without_safe_same_goal_alternative(self):
-        # own_base_direct has no sibling; make it risky
-        routes = [dict(r, risks=[{"step": 2, "enemy_id": "red-1"}]) if r["id"] == "own_base_direct" else r
-                  for r in self.routes]
-        turn = turn_with(routes)
-        label, _, reason = dl.combine_answers(answers(route_bad=0.9, pick="own_base_direct"), options_for(turn), turn, dl.Plan())
-        self.assertEqual((label, reason), ("own_base_direct", "choice"))
-
-    def test_safe_pick_is_kept_even_when_route_bad_high(self):
-        self.assertEqual(self.combine(answers(route_bad=0.9, pick="enemy_flag_safe"))[2], "choice")
-
-    def test_threat_beats_route_bad(self):
-        self.assertEqual(self.combine(answers(threat=0.9, route_bad=0.9, pick="enemy_flag_blocked"))[2], "threat")
+    def test_the_filter_reason_defaults_to_unfiltered(self):
+        self.assertEqual(dl.combine_answers(answers(), )[2], "unfiltered")
 
     def test_unusable_answers_do_not_crash(self):
-        label, conf, reason = self.combine({"action": {"choice": None}})
-        self.assertEqual((label, conf, reason), (None, 0.0, "choice"))
-        label, _, reason = self.combine({"threat": "garbage", "action": {"choice": "wait", "confidence": 0.9}})
-        self.assertEqual((label, reason), ("wait", "choice"))
+        self.assertEqual(dl.combine_answers({"action": {"choice": None}}, "filtered"), (None, 0.0, "filtered"))
+        self.assertEqual(dl.combine_answers("garbage", "lesser_evil"), (None, 0.0, "lesser_evil"))
+
+    def test_extra_answers_from_an_older_server_are_ignored(self):
+        label, _, _ = dl.combine_answers({**answers(pick="wait"), "threat": {"type": "noul", "noul": 0.9}})
+        self.assertEqual(label, "wait")
 
     def test_format_decision_log_line(self):
-        line = dl.format_decision(7, "own_base_safe", 0.31, "avoid blocked/risky", 0.12, 0.81)
-        self.assertEqual(line, "[tick 7] decider -> own_base_safe (0.31) reason=avoid blocked/risky "
-                               "threat=0.12 route_bad=0.81")
+        line = dl.format_decision(7, "own_base_safe", 0.31, "filtered")
+        self.assertEqual(line, "[tick 7] decider -> own_base_safe (0.31) reason=filtered")
+
+
+def agent_entry(aid, team, x, y):
+    return {"id": aid, "team": team, "position": {"x": x, "y": y}, "carrying": None, "disconnected": False}
+
+
+def threat_turn(routes=(), enemies=(), my_flag_carried_by=None, me=(10, 3)):
+    """Blue is me (base (13, 7), field x 8..14); `enemies` are (id, x, y) red agents."""
+    turn = turn_with(list(routes), me=me)
+    state = turn["state"]
+    state["agents"] += [agent_entry("blue-2", "blue", 13, 12)]
+    state["agents"] += [agent_entry(eid, "red", x, y) for eid, x, y in enemies]
+    state["flags"] = [{"team": "red", "position": {"x": 1, "y": 7}, "carried_by": None},
+                      {"team": "blue", "position": {"x": 13, "y": 7}, "carried_by": my_flag_carried_by}]
+    return turn
+
+
+class FlagThreatenedTests(unittest.TestCase):
+    def setUp(self):
+        self.map = dl.parse_map(MAP_RAW)
+
+    def threatened(self, turn, map_info="default"):
+        return ctf_options.flag_threatened(dl.turn_state(turn), self.map if map_info == "default" else map_info)
+
+    def test_quiet_board_is_not_a_threat(self):
+        self.assertFalse(self.threatened(threat_turn(enemies=[("red-1", 2, 7)])))
+
+    def test_my_flag_carried_by_an_enemy_is_a_threat(self):
+        self.assertTrue(self.threatened(threat_turn(my_flag_carried_by="red-1", enemies=[("red-1", 2, 7)])))
+
+    def test_my_flag_carried_by_a_teammate_is_not_a_threat(self):
+        self.assertFalse(self.threatened(threat_turn(my_flag_carried_by="blue-2")))
+
+    def test_an_enemy_in_my_field_within_the_defend_radius_is_a_threat(self):
+        self.assertTrue(self.threatened(threat_turn(enemies=[("red-1", 10, 7)])))  # 3 steps from (13, 7)
+        self.assertTrue(self.threatened(threat_turn(enemies=[("red-1", 9, 7)])))  # exactly 4 steps
+
+    def test_an_enemy_just_outside_the_radius_is_not(self):
+        self.assertFalse(self.threatened(threat_turn(enemies=[("red-1", 8, 7)])))  # 5 steps
+
+    def test_steps_follow_the_walls_not_the_straight_line(self):
+        walls = [{"x": 11, "y": y} for y in range(3, 12)]
+        info = dl.parse_map({**MAP_RAW, "walls": walls})
+        self.assertFalse(self.threatened(threat_turn(enemies=[("red-1", 10, 7)]), info))
+
+    def test_an_enemy_close_to_the_base_but_outside_my_field_is_not(self):
+        info = dl.parse_map({**MAP_RAW, "fields": {**MAP_RAW["fields"], "blue": {"min_x": 10, "max_x": 14}}})
+        self.assertFalse(self.threatened(threat_turn(enemies=[("red-1", 9, 7)]), info))
+
+    def test_without_the_map_only_the_carried_flag_counts(self):
+        self.assertFalse(self.threatened(threat_turn(enemies=[("red-1", 12, 7)]), None))
+        self.assertTrue(self.threatened(threat_turn(my_flag_carried_by="red-1"), None))
+
+
+class FilterOptionsTests(unittest.TestCase):
+    def setUp(self):
+        self.map = dl.parse_map(MAP_RAW)
+        self.routes = [
+            route("enemy_flag_direct", "enemy_flag", length=6, risks=[(3, "red-1")]),
+            route("enemy_flag_safe", "enemy_flag", step="up", length=9),
+            route("enemy_flag_blocked", "enemy_flag", length=4, blocked=True),
+            route("tag:red-1", "tag", step="left", length=3),
+            route("tag:red-2", "tag", step=None, length=0, blocked=True),
+            route("defend_flag", "defend_flag", step="right", length=2),
+            route("own_base_direct", "own_base", length=8),
+        ]
+
+    def run_filter(self, routes=None, **kw):
+        turn = threat_turn(self.routes if routes is None else routes, **kw)
+        return dl.filter_options(options_for(turn), turn, self.map)
+
+    def test_without_a_threat_bad_routes_are_dropped_and_wait_stays(self):
+        result = self.run_filter(enemies=[("red-1", 2, 7)])
+        self.assertEqual(set(result.options), {"enemy_flag_safe", "tag:red-1", "defend_flag", "own_base_direct", "wait"})
+        self.assertEqual(result.reason, "filtered")
+
+    def test_a_threat_offers_only_unblocked_tag_or_defend_options_and_wait(self):
+        result = self.run_filter(enemies=[("red-1", 10, 7)])
+        self.assertEqual(set(result.options), {"tag:red-1", "defend_flag", "wait"})
+        self.assertEqual(result.reason, "filtered")
+
+    def test_a_threat_with_risky_tag_route_still_offers_it(self):
+        # a tag route is unblocked even with a risk: only `blocked_now` disqualifies it in the threat branch
+        routes = [dict(r, risks=[{"step": 1, "enemy_id": "red-1"}]) if r["id"] == "tag:red-1" else r
+                  for r in self.routes]
+        result = self.run_filter(routes, enemies=[("red-1", 10, 7)])
+        self.assertIn("tag:red-1", result.options)
+
+    def test_a_carried_flag_is_a_threat_too(self):
+        result = self.run_filter(my_flag_carried_by="red-1", enemies=[("red-1", 12, 7)])
+        self.assertEqual(set(result.options), {"tag:red-1", "defend_flag", "wait"})
+
+    def test_a_threat_without_an_unblocked_defender_falls_back_to_dropping_bad_routes(self):
+        routes = [dict(r, blocked_now=True) if r["goal"] in ("tag", "defend_flag") else r for r in self.routes]
+        result = self.run_filter(routes, enemies=[("red-1", 10, 7)])
+        self.assertEqual(set(result.options), {"enemy_flag_safe", "own_base_direct", "wait"})
+
+    def test_when_only_wait_would_remain_the_full_set_is_offered(self):
+        routes = [route("enemy_flag_direct", "enemy_flag", risks=[(2, "red-1")]),
+                  route("own_base_direct", "own_base", blocked=True)]
+        turn = threat_turn(routes, enemies=[("red-1", 2, 7)])
+        options = options_for(turn)
+        result = dl.filter_options(options, turn, self.map)
+        self.assertEqual((result.options, result.reason), (options, "lesser_evil"))
+
+    def test_nothing_to_drop_is_unfiltered(self):
+        routes = [route("enemy_flag_safe", "enemy_flag", length=9)]
+        turn = threat_turn(routes, enemies=[("red-1", 2, 7)])
+        self.assertEqual(dl.filter_options(options_for(turn), turn, self.map).reason, "unfiltered")
+
+    def test_non_route_options_survive_the_bad_route_filter(self):
+        turn = turn_with([], me=(5, 5))
+        turn["state"]["moves"] = {"up": "open", "down": "wall", "left": "open", "right": "open"}
+        options = options_for(turn)
+        self.assertEqual(dl.filter_options(options, turn, self.map).options, options)
+
+    def test_the_carrier_exclusion_of_the_length_zero_flag_route_is_kept(self):
+        turn = threat_turn([route("enemy_flag_direct", "enemy_flag", step=None, length=0),
+                            route("own_base_direct", "own_base", length=6)], enemies=[("red-1", 2, 7)])
+        turn["state"]["agents"][0]["carrying"] = "red"
+        result = dl.filter_options(options_for(turn), turn, self.map)
+        self.assertNotIn("enemy_flag_direct", result.options)
+        self.assertIn("own_base_direct", result.options)
+
+    def test_the_gate_validates_the_pick_against_the_filtered_set(self):
+        result = self.run_filter(enemies=[("red-1", 2, 7)])
+        gate = dl.build_gate()
+        self.assertEqual(gate.route("enemy_flag_blocked", 0.99, result.options, 5000), "llm")
+        self.assertEqual(gate.route("enemy_flag_blocked", 0.99, result.options, 100), "wait")
+        self.assertEqual(gate.route("enemy_flag_safe", 0.99, result.options, 5000), "decider")
+
+
+class RequestSizeTests(unittest.TestCase):
+    def test_the_rendered_request_stays_under_the_character_budget(self):
+        """Request size for the warm-up state (what the Decider is billed for, ~1 ms per input token).
+
+        Baseline measured before Option A (3 questions, long instructions, verbose options, all routes listed
+        twice): 2856 characters of JSON (state 789 + questions 2010).
+        After Option A (one question, one-sentence instructions, compact options, filtered options and routes):
+        1041 characters (state 499 + questions 492). The budget is that value plus ~10% headroom.
+        """
+        state, questions = dl.warmup_question()
+        size = len(json.dumps({"state": state, "questions": questions}))
+        self.assertLessEqual(size, REQUEST_CHAR_BUDGET, size)
+
+    def test_the_instructions_are_one_sentence(self):
+        self.assertEqual(ctf_options.DECIDER_INSTRUCTIONS.count(". "), 0)
+        self.assertLess(len(ctf_options.DECIDER_INSTRUCTIONS), 250)
+
+
+REQUEST_CHAR_BUDGET = 1150
 
 
 class BlockedAnnotationTests(unittest.TestCase):
@@ -165,13 +240,13 @@ class BlockedAnnotationTests(unittest.TestCase):
 
     def test_unblocked_route_keeps_continues_annotation(self):
         turn, plan = self.plan_and_turn(False)
-        self.assertIn("continues your current path", dl.build_options(turn, plan)["enemy_flag_direct"])
+        self.assertIn("your plan's path (", dl.build_options(turn, plan)["enemy_flag_direct"])
 
     def test_blocked_route_is_not_annotated_as_continuing(self):
         turn, plan = self.plan_and_turn(True)
         text = dl.build_options(turn, plan)["enemy_flag_direct"]
-        self.assertNotIn("continues your current path", text)
-        self.assertIn("| would continue your path but is BLOCKED now", text)
+        self.assertNotIn("your plan's path (", text)
+        self.assertIn("| your plan's path, now blocked", text)
 
 
 class CarrierRouteTests(unittest.TestCase):
@@ -214,11 +289,11 @@ class DeciderLoopCliTests(unittest.TestCase):
         finally:
             sys.argv = old
         self.assertEqual(args.name, "decider-agent")
-        self.assertEqual(args.threat_threshold, 0.5)
+        self.assertFalse(hasattr(args, "threat_threshold"))
 
-    def test_warmup_asks_all_three_questions(self):
+    def test_warmup_asks_the_single_action_question(self):
         _, questions = dl.warmup_question()
-        self.assertEqual(set(questions), {"threat", "route_bad", "action"})
+        self.assertEqual(set(questions), {"action"})
 
 
 class ExplodingDecider:
@@ -303,9 +378,10 @@ class LlmOnlyTests(unittest.TestCase):
         self.assertEqual(stats.budget_ticks, 0)
 
     def test_llm_timeout_falls_back_to_wait(self):
+        # The abandoned thread is still alive on tick 2, so no second LLM call starts (llm_busy -> wait).
         stats, client, _ = self.play(self.parse("--llm-only"), ticks=2, timed_out=True)
         self.assertEqual([c for c in client.calls if c[0] == "wait"], [("wait", {"tick": 1}), ("wait", {"tick": 2})])
-        self.assertEqual((stats.llm_ticks, stats.llm_timeouts), (0, 2))
+        self.assertEqual((stats.llm_ticks, stats.llm_timeouts), (0, 1))
 
     def test_no_warmup_request_in_llm_only_mode(self):
         # ExplodingDecider raises on any attribute access, so reaching the end proves no warm-up.
@@ -364,11 +440,11 @@ class StaticMapTests(unittest.TestCase):
 
     def test_closest_threat_replaces_nearest_enemy(self):
         text = describe_route(route("r", "enemy_flag", length=4, threat=("red-1", 3, 2)))
-        self.assertIn("closest threat red-1 at step 3, distance 2", text)
+        self.assertIn("threat red-1 dist 2", text)
         # a null threat is missing data, like an absent key: no clause at all
         self.assertNotIn("threat", describe_route(route("r", "enemy_flag")))
         legacy = {"id": "r", "goal": "enemy_flag", "first_step": "up", "length": 2}
-        self.assertEqual(describe_route(legacy), "goal enemy_flag, 2 steps, first step up")
+        self.assertEqual(describe_route(legacy), "goal enemy_flag, 2 steps, first up")
 
     def test_the_tag_fallback_needs_the_map(self):
         turn = turn_with([], me=(5, 5))
@@ -392,7 +468,8 @@ class StaticMapTests(unittest.TestCase):
 
     def test_the_warm_up_state_has_the_v2_shape(self):
         state, _ = dl.warmup_question()
-        self.assertIn("closest threat red-1 at step 6, distance 2", state)
+        self.assertIn("threat red-2 dist 4", state)  # a routes line survives the filter
+        self.assertNotIn("enemy_flag_direct", state)  # the risky route was filtered out of the state too
         self.assertIn("in your own field", state)
         self.assertNotIn("nearest enemy", state)
 

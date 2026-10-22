@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from typing import Any
 
 from examples.ctf_agent.options import describe_route, plan_active, plan_age, plural
@@ -50,10 +51,10 @@ def describe_event(event: Any) -> str:
 
 def plan_line(turn: dict[str, Any], plan: Plan) -> str:
     target = f", heading to {plan.path[-1]}" if plan.path else ""
-    head = f"current plan: goal {plan.goal}{target} since tick {plan.since_tick}"
+    head = f"plan: {plan.goal}{target}, since tick {plan.since_tick}"
     me = my_position(turn_state(turn))
     if not any(route_continues_plan(plan, me, r) for r in offered_routes(turn_state(turn))):
-        return f"{head} \u2014 no offered route continues that path"
+        return f"{head}; no route continues it"
     line = f"{head}, {plural(plan_age(turn, plan), 'tick')}"
     return f"{line}; last action: {plan.last_action}" if plan.last_action else line
 
@@ -73,6 +74,7 @@ def render_state(
     plan: Plan | None = None,
     map_info: MapInfo | None = None,
     include_last_action: bool = False,
+    only_routes: Collection[str] | None = None,
 ) -> str:
     """Short, human-readable summary of a wait_for_turn result for the decider and the LLM fallback.
 
@@ -81,6 +83,9 @@ def render_state(
 
     The server's `last_action` is rendered only with `include_last_action` (the LLM fallback): the decider is a
     trained model and its input text must not change until that wording has been evaluated.
+
+    `only_routes` lists just those route ids (the options the Decider is offered after filtering); the
+    LLM fallback leaves it unset and sees every route.
     """
     state = turn_state(turn)
     me = my_position(state)
@@ -115,7 +120,7 @@ def render_state(
     if mates:
         lines.append(f"teammates: {json.dumps(mates)}")
 
-    routes = offered_routes(state)
+    routes = [r for r in offered_routes(state) if only_routes is None or r["id"] in only_routes]
     if routes:
         lines.append("routes:")
         lines.extend(f"  {route['id']}: {describe_route(route)}" for route in routes)
