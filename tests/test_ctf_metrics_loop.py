@@ -123,6 +123,21 @@ def test_shadow_records_decider_choice_next_to_the_executed_label_after_the_llm_
     assert (second["shadow_label"], second["shadow_confidence"]) == ("wait", 0.4)
 
 
+def test_shadow_records_the_filtered_option_set_the_decider_saw(tmp_path):
+    target, events = tmp_path / "f.jsonl", []
+    decider = LoggingDecider([("enemy_flag_direct", 0.9), ("wait", 0.4)], events)
+    run(parse("--llm-only", "--shadow-decider", "--no-warmup", "--metrics", str(target)), decider, events=events)
+    for record in read(target):
+        assert record["filter_reason"] in ("filtered", "unfiltered", "lesser_evil")
+        assert isinstance(record["options_offered"], int) and record["options_offered"] >= 1
+
+
+def test_llm_only_without_shadow_records_no_filter_fields(tmp_path):
+    target = tmp_path / "nf.jsonl"
+    run(parse("--llm-only", "--metrics", str(target)), ScriptedDecider([]))
+    assert all(r["filter_reason"] is None and r["options_offered"] is None for r in read(target))
+
+
 def test_shadow_off_leaves_the_fields_empty_and_never_asks_the_decider(tmp_path):
     target = tmp_path / "n.jsonl"
     decider = ScriptedDecider([])

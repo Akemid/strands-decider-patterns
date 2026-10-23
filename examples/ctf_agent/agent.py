@@ -467,8 +467,9 @@ def _play(client: MCPClient, decider: Decider | None, args: argparse.Namespace, 
                       f"{turn.get('deadline_remaining_ms')} ms")
 
         base = {"tick": tick, "mode": mode, "decider_ms": decider_ms, "decider_input_tokens": decider_tokens,
-                "filter_reason": None if llm_only else filtered.reason,
-                "options_offered": None if llm_only else len(options),
+                # the shadow Decider sees the same filtered set, so it is recorded in shadow mode too
+                "filter_reason": filtered.reason if not llm_only or shadow else None,
+                "options_offered": len(options) if not llm_only or shadow else None,
                 "label": chosen, "confidence": confidence if chosen is not None else None,
                 "reason": None if llm_only else reason}
         decider_down = gate.decider_down
