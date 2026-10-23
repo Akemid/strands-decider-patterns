@@ -44,10 +44,17 @@ uv run python simulator/serve.py                      # terminal 1
 uv run python -m examples.ctf_agent.agent --match demo  # terminal 2
 ```
 
-Useful flags: `--threshold` (Decider confidence needed to skip the LLM, default 0.85),
-`--llm-only` (ablation, no Decider server needed), `--model haiku|opus|nova-lite`, `--metrics PATH`,
+Useful flags: `--threshold` (Decider confidence needed to skip the LLM, default 0.85; the reported real-server
+results use `--threshold 0.70`, picked from coverage on real turns with `scripts/threshold_sweep.py`),
+`--llm-only` (ablation, no Decider server needed), `--shadow-decider` (with `--llm-only`: also ask the Decider after
+the LLM acted, never executed, to calibrate the threshold), `--model haiku|opus|nova-lite`, `--metrics PATH`,
 `--raw-turns` (print the state and options sent to the Decider), `--no-warmup`, `--team red|blue`,
 `--agent-index N`, `--record-turns PATH`.
+
+Cost guards: `--max-llm-calls N` (real model invocations per run, default 60, `0` = never call Bedrock),
+`--max-tokens N` (Bedrock `max_tokens`, default 1024), `--max-consecutive-llm-errors N` (stop after N transient
+Bedrock errors in a row, such as throttling, default 3; each one is handled per tick first), `--llm-budget-ms`
+(see below).
 
 Environment: `CTF_MCP_URL` (default `http://127.0.0.1:8765/mcp`), `STRANDS_DECIDER_URL`.
 
