@@ -6,6 +6,8 @@ and a local simulator so everything runs end to end on a laptop.
 
 Hackathon: *Agent Experience Hackathon: Strands Decider*. Declared pattern: **#tool-selection**.
 
+Demo video (under 3 minutes): https://youtu.be/BX6Ps0Rnb8o
+
 ## The idea
 
 Most agent ticks do not need an LLM. The agent already knows its options (which tools make sense right now);
